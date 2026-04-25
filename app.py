@@ -31,17 +31,27 @@ CHURN_COLORS  = {"No": "#2196F3", "Yes": "#F44336"}
 MODEL_COLORS  = ["#4CAF50", "#2196F3", "#FF9800", "#9C27B0"]
 TEMPLATE      = "plotly_dark"
 
-NUMERIC_COLS  = ["tenure", "MonthlyCharges", "TotalCharges", "SeniorCitizen"]
-BINARY_COLS   = ["gender", "Partner", "Dependents", "PhoneService", "PaperlessBilling"]
-MULTI_COLS    = [
-    "MultipleLines", "InternetService", "OnlineSecurity", "OnlineBackup",
-    "DeviceProtection", "TechSupport", "StreamingTV", "StreamingMovies",
-    "Contract", "PaymentMethod",
-]
-
 
 def _clean(names) -> list[str]:
     return [n.split("__", 1)[1] if "__" in n else n for n in names]
+
+
+def _extract_shap_array(shap_vals):
+    if isinstance(shap_vals, list):
+        return shap_vals[1] if len(shap_vals) > 1 else shap_vals[0]
+    if getattr(shap_vals, "ndim", 0) == 3:
+        return shap_vals[:, :, 1] if shap_vals.shape[2] > 1 else shap_vals[:, :, 0]
+    return shap_vals
+
+
+def _top_shap_features(shap_vals, feat_names: list[str], top_n: int = 5) -> pd.DataFrame:
+    shap_array = _extract_shap_array(shap_vals)
+    mean_abs = np.abs(shap_array).mean(axis=0)
+    top_idx = np.argsort(mean_abs)[::-1][:top_n]
+    return pd.DataFrame({
+        "Feature": np.array(feat_names)[top_idx],
+        "Mean |SHAP|": mean_abs[top_idx],
+    })
 
 
 # ── Load pre-trained artifacts ──────────────────────────────────────────────────
@@ -51,7 +61,7 @@ def load_artifacts() -> dict:
 
 
 # ── Section: Overview ──────────────────────────────────────────────────────────
-def render_overview(df: pd.DataFrame) -> None:
+def render_overview(df: pd.DataFrame, numeric_cols: list[str]) -> None:
     st.subheader("Dataset Overview")
 
     m1, m2, m3, m4 = st.columns(4)
@@ -82,22 +92,74 @@ def render_overview(df: pd.DataFrame) -> None:
         st.markdown("**Sample rows**")
         st.dataframe(display.head(8), use_container_width=True, height=310)
 
-    st.markdown("**Numeric Feature Statistics**")
+    if numeric_cols:
+        stats_cols = numeric_cols[:12]
+        st.markdown("**Numeric Feature Statistics**")
+        st.caption(f"Showing {len(stats_cols)} of {len(numeric_cols)} numeric features")
+        st.dataframe(
+            df[stats_cols].describe().round(2), use_container_width=True
+        )
+
+
+def render_model_card(
+    df: pd.DataFrame,
+    cv_results: dict,
+    shap_vals,
+    feat_names: list[str],
+    dataset_name: str,
+    dataset_key: str,
+    shap_model_name: str,
+) -> None:
+    st.subheader("Model Card")
+
+    results_df = (
+        pd.DataFrame(cv_results)
+        .T.reset_index()
+        .rename(columns={"index": "Model"})
+        .sort_values("ROC-AUC", ascending=False)
+    )
+    best_row = results_df.iloc[0]
+    top_features = _top_shap_features(shap_vals, feat_names, top_n=5)
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Dataset", dataset_name)
+    c2.metric("Best ROC-AUC", f"{best_row['ROC-AUC']:.3f}")
+    c3.metric("Churn Rate", f"{df['Churn'].mean() * 100:.1f}%")
+
+    st.caption(
+        f"Best model: {best_row['Model']}. SHAP summary generated with {shap_model_name}."
+    )
+
+    summary = [
+        f"Rows: {len(df):,} | Predictors: {df.shape[1] - 1}",
+        f"Class balance: {100 - df['Churn'].mean() * 100:.1f}% stay vs {df['Churn'].mean() * 100:.1f}% churn",
+        (
+            "KDDCup09 uses anonymized variables, so feature interpretation is relative importance rather than business-readable labels."
+            if dataset_key == "kddcup09"
+            else "IBM Telco uses business-readable columns, so feature effects are directly interpretable."
+        ),
+    ]
+    for line in summary:
+        st.markdown(f"- {line}")
+
+    st.markdown("**Top SHAP Drivers**")
     st.dataframe(
-        df[NUMERIC_COLS].describe().round(2), use_container_width=True
+        top_features.style.format({"Mean |SHAP|": "{:.4f}"}),
+        use_container_width=True,
+        hide_index=True,
     )
 
 
 # ── Section: Feature Explorer ──────────────────────────────────────────────────
-def render_feature_explorer(df: pd.DataFrame) -> None:
+def render_feature_explorer(df: pd.DataFrame, numeric_cols: list[str], categorical_cols: list[str]) -> None:
     st.subheader("Feature Explorer")
-    all_features = NUMERIC_COLS + BINARY_COLS + MULTI_COLS
+    all_features = numeric_cols + categorical_cols
     feature = st.selectbox("Select a feature to explore:", all_features)
 
     churn_label = df["Churn"].map({0: "No", 1: "Yes"})
     col1, col2  = st.columns(2)
 
-    if feature in NUMERIC_COLS:
+    if feature in numeric_cols:
         with col1:
             fig = px.histogram(
                 df.assign(Churn=churn_label),
@@ -149,61 +211,58 @@ def render_feature_explorer(df: pd.DataFrame) -> None:
             st.plotly_chart(fig, use_container_width=True)
 
     st.markdown("**Pearson Correlation with Churn (numeric features)**")
-    corr = (
-        df[NUMERIC_COLS + ["Churn"]]
-        .corr()["Churn"]
-        .drop("Churn")
-        .reset_index()
-    )
-    corr.columns = ["Feature", "Correlation"]
-    fig = px.bar(
-        corr, x="Feature", y="Correlation",
-        color="Correlation",
-        color_continuous_scale="RdBu",
-        color_continuous_midpoint=0,
-        title="Pearson Correlation with Churn",
-        template=TEMPLATE,
-    )
-    st.plotly_chart(fig, use_container_width=True)
+    if numeric_cols:
+        corr = (
+            df[numeric_cols + ["Churn"]]
+            .corr()["Churn"]
+            .drop("Churn")
+            .reset_index()
+        )
+        corr.columns = ["Feature", "Correlation"]
+        corr = corr.reindex(corr["Correlation"].abs().sort_values(ascending=False).index).head(25)
+        fig = px.bar(
+            corr, x="Feature", y="Correlation",
+            color="Correlation",
+            color_continuous_scale="RdBu",
+            color_continuous_midpoint=0,
+            title="Pearson Correlation with Churn",
+            template=TEMPLATE,
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 
 # ── Section: Preprocessing ─────────────────────────────────────────────────────
-def render_preprocessing() -> None:
+def render_preprocessing(
+    numeric_cols: list[str],
+    categorical_cols: list[str],
+    dataset_name: str,
+    dataset_key: str,
+) -> None:
     st.subheader("Preprocessing Pipeline")
+    st.caption(f"Configured for: {dataset_name}")
     steps = [
         (
-            "1. Drop customerID",
-            "Removes the `customerID` column — a non-informative identifier that would "
-            "leak row identity into model training.",
+            "1. Encode target",
+            "`Churn` is encoded as a binary integer (1 = churn, 0 = stay).",
         ),
         (
-            "2. Encode target",
-            "`Churn` → binary integer (Yes → 1, No → 0).",
+            "2. Missing value handling",
+            "Numeric features use median imputation; categorical features use mode imputation.",
         ),
         (
-            "3. Fix TotalCharges",
-            "Some rows contain whitespace instead of a numeric value. "
-            "Coerced to numeric; 11 resulting NaN rows filled with the column median.",
+            "3. Scale numeric features",
+            f"{len(numeric_cols)} numeric columns are standardized with `StandardScaler`.",
         ),
         (
-            "4. Scale numeric features",
-            "`tenure`, `MonthlyCharges`, `TotalCharges`, `SeniorCitizen` → "
-            "`StandardScaler` (zero mean, unit variance). "
-            "Median imputation applied first inside the pipeline.",
+            "4. Encode categorical features",
+            (
+                f"{len(categorical_cols)} categorical columns use `OrdinalEncoder` with unknown-value handling."
+                if dataset_key == "kddcup09"
+                else f"{len(categorical_cols)} categorical columns use `OneHotEncoder(drop='if_binary', handle_unknown='ignore')`."
+            ),
         ),
         (
-            "5. Encode binary features",
-            "`gender`, `Partner`, `Dependents`, `PhoneService`, `PaperlessBilling` → "
-            "`OneHotEncoder(drop='first')` — produces a single binary column per feature.",
-        ),
-        (
-            "6. Encode multi-category features",
-            "`MultipleLines`, `InternetService`, `OnlineSecurity`, `OnlineBackup`, "
-            "`DeviceProtection`, `TechSupport`, `StreamingTV`, `StreamingMovies`, "
-            "`Contract`, `PaymentMethod` → `OneHotEncoder(drop='first', handle_unknown='ignore')`.",
-        ),
-        (
-            "7. sklearn Pipeline + ColumnTransformer",
+            "5. sklearn Pipeline + ColumnTransformer",
             "All steps are wrapped in a `ColumnTransformer` (applied per column group) "
             "and then a `Pipeline([('prep', preprocessor), ('clf', model)])` per model. "
             "This guarantees zero data leakage during cross-validation — "
@@ -215,22 +274,28 @@ def render_preprocessing() -> None:
         with st.expander(title, expanded=False):
             st.markdown(desc)
 
-    st.code(
-        """ColumnTransformer([
-    ('num', Pipeline([SimpleImputer(median), StandardScaler()]),  numeric_cols),
-    ('bin', Pipeline([SimpleImputer(mode),   OneHotEncoder(drop='first')]), binary_cols),
-    ('cat', Pipeline([SimpleImputer(mode),   OneHotEncoder(drop='first')]), multi_cols),
+    if dataset_key == "kddcup09":
+        preprocess_code = """ColumnTransformer([
+    ('num', Pipeline([SimpleImputer(median), StandardScaler()]), numeric_cols),
+    ('cat', Pipeline([SimpleImputer(mode), OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=-1)]), categorical_cols),
 ])
 # Wrapped per model:
-Pipeline([('prep', ColumnTransformer), ('clf', <estimator>)])""",
-        language="python",
-    )
+Pipeline([('prep', ColumnTransformer), ('clf', <estimator>)])"""
+    else:
+        preprocess_code = """ColumnTransformer([
+    ('num', Pipeline([SimpleImputer(median), StandardScaler()]), numeric_cols),
+    ('cat', Pipeline([SimpleImputer(mode), OneHotEncoder(drop='if_binary', handle_unknown='ignore')]), categorical_cols),
+])
+# Wrapped per model:
+Pipeline([('prep', ColumnTransformer), ('clf', <estimator>)])"""
+
+    st.code(preprocess_code, language="python")
 
 
 # ── Section: Model Comparison ──────────────────────────────────────────────────
-def render_model_comparison(cv_results: dict) -> None:
+def render_model_comparison(cv_results: dict, n_rows: int, cv_folds: int) -> None:
     st.subheader("Model Comparison")
-    st.caption("5-fold stratified cross-validation on the full dataset (n = 7,043)")
+    st.caption(f"{cv_folds}-fold stratified cross-validation on the full dataset (n = {n_rows:,})")
 
     df_res = (
         pd.DataFrame(cv_results)
@@ -371,14 +436,36 @@ def render_feature_importance(shap_vals, feat_names: list, X_trans) -> None:
 
 
 # ── Section: Prediction Demo ───────────────────────────────────────────────────
-def render_prediction(X, final_models: dict) -> None:
+def render_prediction(X, X_te, y_te, final_models: dict, dataset_meta: dict, shap_model_name: str) -> None:
     st.subheader("Churn Probability Predictor")
-    st.caption("Input a customer profile to receive a churn probability estimate from any trained model.")
+    st.caption("Estimate churn probability using any trained model.")
 
     model_names  = list(final_models.keys())
     default_idx  = model_names.index("XGBoost") if "XGBoost" in model_names else 0
     chosen_model = st.selectbox("Model:", model_names, index=default_idx)
     pipe         = final_models[chosen_model]
+
+    if dataset_meta.get("prediction_mode") != "form":
+        st.info("This dataset uses a high-dimensional schema, so prediction demo runs on holdout rows.")
+        idx = st.slider("Choose a holdout row index", 0, len(X_te) - 1, 0)
+        row = X_te.iloc[[idx]].copy()
+        prob = pipe.predict_proba(row)[0, 1]
+        pred = "Likely to Churn" if prob >= 0.5 else "Likely to Stay"
+        actual = "Churn" if int(y_te.iloc[idx]) == 1 else "No Churn"
+        color = "#F44336" if prob >= 0.5 else "#4CAF50"
+        st.markdown(
+            f"""<div style="padding:24px; border-radius:12px;
+                background:{color}22; border:2px solid {color};
+                text-align:center; margin-top:16px;">
+  <h2 style="color:{color}; margin:0;">{pred}</h2>
+  <h3 style="margin:8px 0 0 0;">Churn Probability: <strong>{prob * 100:.1f}%</strong></h3>
+  <p style="opacity:.8; margin:8px 0 0 0;">Actual label: {actual} | Model: {chosen_model}</p>
+</div>""",
+            unsafe_allow_html=True,
+        )
+        st.markdown("**Selected holdout row (first 20 columns)**")
+        st.dataframe(row.iloc[:, :20], use_container_width=True)
+        return
 
     with st.form("predict_form"):
         c1, c2, c3 = st.columns(3)
@@ -455,7 +542,7 @@ def render_prediction(X, final_models: dict) -> None:
             unsafe_allow_html=True,
         )
 
-        if chosen_model == "XGBoost":
+        if chosen_model == shap_model_name:
             prep  = pipe.named_steps["prep"]
             clf   = pipe.named_steps["clf"]
             X_row = prep.transform(row)
@@ -488,11 +575,6 @@ def render_prediction(X, final_models: dict) -> None:
 # ── Main ───────────────────────────────────────────────────────────────────────
 def main() -> None:
     st.title("📡 Supervised ML: Customer Churn Prediction Pipeline")
-    st.markdown(
-        "**Dataset:** IBM Telco Customer Churn — 7,043 telecom subscribers, 20 features. "
-        "**Objective:** Identify which customers are at risk of cancelling their subscription. "
-        "Full sklearn pipeline: preprocessing → 5-fold CV → SHAP explainability."
-    )
 
     arts = load_artifacts()
     df          = arts["df"]
@@ -505,8 +587,23 @@ def main() -> None:
     shap_vals   = arts["shap_vals"]
     feat_names  = arts["feat_names"]
     X_trans     = arts["X_trans"]
+    dataset_meta = arts.get("dataset_meta", {})
+    shap_model_name = arts.get("shap_model_name", "XGBoost")
+    cv_folds = int(arts.get("cv_folds", 5))
+    numeric_cols = dataset_meta.get("numeric_cols", [c for c in X.columns if pd.api.types.is_numeric_dtype(X[c])])
+    categorical_cols = dataset_meta.get("categorical_cols", [c for c in X.columns if c not in numeric_cols])
+    dataset_name = dataset_meta.get("dataset_name", "Customer Churn Dataset")
+    dataset_key = dataset_meta.get("dataset_key", "")
+    dataset_desc = dataset_meta.get("dataset_description", "")
+
+    st.markdown(
+        f"**Dataset:** {dataset_name}. {dataset_desc} "
+        "**Objective:** Identify which customers are at risk of cancelling their subscription. "
+        "Full sklearn pipeline: preprocessing → 5-fold CV → SHAP explainability."
+    )
 
     tabs = st.tabs([
+        "🧾 Model Card",
         "📊 Overview",
         "🔍 Feature Explorer",
         "⚙️ Preprocessing",
@@ -516,13 +613,14 @@ def main() -> None:
         "🎯 Prediction Demo",
     ])
 
-    with tabs[0]: render_overview(df)
-    with tabs[1]: render_feature_explorer(df)
-    with tabs[2]: render_preprocessing()
-    with tabs[3]: render_model_comparison(cv_results)
-    with tabs[4]: render_evaluation(X_te, y_te, eval_models)
-    with tabs[5]: render_feature_importance(shap_vals, feat_names, X_trans)
-    with tabs[6]: render_prediction(X, final_models)
+    with tabs[0]: render_model_card(df, cv_results, shap_vals, feat_names, dataset_name, dataset_key, shap_model_name)
+    with tabs[1]: render_overview(df, numeric_cols)
+    with tabs[2]: render_feature_explorer(df, numeric_cols, categorical_cols)
+    with tabs[3]: render_preprocessing(numeric_cols, categorical_cols, dataset_name, dataset_key)
+    with tabs[4]: render_model_comparison(cv_results, len(df), cv_folds)
+    with tabs[5]: render_evaluation(X_te, y_te, eval_models)
+    with tabs[6]: render_feature_importance(shap_vals, feat_names, X_trans)
+    with tabs[7]: render_prediction(X, X_te, y_te, final_models, dataset_meta, shap_model_name)
 
 
 if __name__ == "__main__":
