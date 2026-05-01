@@ -81,14 +81,60 @@ def load_kdd_data() -> tuple[pd.DataFrame, dict]:
     return df, meta
 
 
+def load_kkbox_data() -> tuple[pd.DataFrame, dict]:
+    # KKBox challenge data requires Kaggle access. This loader expects a pre-joined
+    # local file produced from the challenge tables.
+    path = os.getenv("KKBOX_FEATURES_PATH", "data/kkbox_churn_features.csv")
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"KKBox feature file not found at {path}. Provide a pre-joined feature table "
+            "with a binary 'is_churn' or 'Churn' column."
+        )
+
+    df = pd.read_csv(path)
+    target_col = "is_churn" if "is_churn" in df.columns else "Churn"
+    if target_col not in df.columns:
+        raise ValueError("KKBox feature file must contain 'is_churn' or 'Churn' target column")
+
+    df["Churn"] = pd.to_numeric(df[target_col], errors="coerce").fillna(0).astype(int)
+    if target_col != "Churn":
+        df = df.drop(columns=[target_col])
+
+    # Remove obvious IDs if present to reduce leakage risk.
+    leak_cols = [c for c in ["msno", "transaction_date", "membership_expire_date"] if c in df.columns]
+    if leak_cols:
+        df = df.drop(columns=leak_cols)
+
+    numeric_cols = [c for c in df.columns if c != "Churn" and pd.api.types.is_numeric_dtype(df[c])]
+    categorical_cols = [c for c in df.columns if c not in numeric_cols + ["Churn"]]
+    meta = {
+        "dataset_key": "kkbox",
+        "dataset_name": "KKBox Churn Challenge (pre-joined features)",
+        "dataset_description": "Subscription churn dataset with high-cardinality and temporal behavior signals.",
+        "numeric_cols": numeric_cols,
+        "binary_cols": [],
+        "multi_cols": categorical_cols,
+        "categorical_cols": categorical_cols,
+        "prediction_mode": "sample_row",
+        "cv_folds": 3,
+    }
+    return df, meta
+
+
 def load_data() -> tuple[pd.DataFrame, dict]:
     dataset_key = os.getenv("CHURN_DATASET", "kddcup09").strip().lower()
     if dataset_key in {"telco", "telco_ibm", "ibm"}:
         return load_telco_data()
+    if dataset_key in {"kkbox", "kkbox_challenge"}:
+        try:
+            return load_kkbox_data()
+        except Exception as exc:
+            print(f"   KKBox dataset unavailable ({exc}); falling back to KDDCup09.")
+            return load_kdd_data()
     if dataset_key in {"kdd", "kddcup09", "openml_kdd"}:
         return load_kdd_data()
     raise ValueError(
-        "Unsupported CHURN_DATASET value. Use one of: telco_ibm, kddcup09"
+        "Unsupported CHURN_DATASET value. Use one of: telco_ibm, kddcup09, kkbox"
     )
 
 

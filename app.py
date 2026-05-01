@@ -1,6 +1,6 @@
 """
 Supervised ML: Customer Churn Prediction Pipeline
-IBM Telco Customer Churn dataset — 7,043 telecom customers, 20 features.
+Supports IBM Telco baseline, KDDCup09 (OpenML), and optional KKBox pre-joined features.
 """
 
 import warnings
