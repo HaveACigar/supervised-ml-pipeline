@@ -81,6 +81,94 @@ def load_kdd_data() -> tuple[pd.DataFrame, dict]:
     return df, meta
 
 
+def load_bankchurners_data() -> tuple[pd.DataFrame, dict]:
+    """
+    Bank Customer Attrition (BankChurners) via OpenML (data_id=42178).
+    ~10,127 rows, 21 meaningful features after cleaning.
+
+    Data cleaning steps demonstrated:
+    1. Drop CLIENTNUM (raw ID column — no predictive value)
+    2. Drop two Naive Bayes classifier columns leaked into the source CSV
+    3. Map Attrition_Flag ("Attrited Customer" / "Existing Customer") to binary Churn
+    4. Normalize verbose Q4-Q1 change column names to shorter readable form
+    5. Keep "Unknown" as an explicit category in Education_Level / Income_Category
+       (domain-appropriate: unknown income/education is itself a signal)
+    """
+    ds = fetch_openml(data_id=42178, as_frame=True, parser="auto")
+    df = ds.data.copy()
+
+    # ── Step 1 & 2: Drop ID and leaked model columns ──────────────────────────
+    drop_cols = [c for c in df.columns if
+                 c == "CLIENTNUM" or
+                 c.lower().startswith("naive_bayes")]
+    if drop_cols:
+        df = df.drop(columns=drop_cols)
+
+    # ── Step 3: Encode target ─────────────────────────────────────────────────
+    target_col = "Attrition_Flag"
+    if target_col not in df.columns:
+        # Some OpenML versions already name it differently
+        target_col = next(
+            (c for c in df.columns if "attrition" in c.lower() or "churn" in c.lower()),
+            None,
+        )
+    if target_col is None:
+        raise ValueError("Cannot locate target column in BankChurners dataset.")
+
+    df["Churn"] = (
+        ds.target.astype(str).str.strip()
+        .map({"Attrited Customer": 1, "1": 1})
+        .fillna(0).astype(int)
+    )
+    df = df.drop(columns=[target_col], errors="ignore")
+
+    # ── Step 4: Rename verbose Q4-Q1 change columns ───────────────────────────
+    rename_map = {
+        "Total_Amt_Chg_Q4_Q1": "Txn_Amt_Change",
+        "Total_Ct_Chg_Q4_Q1":  "Txn_Ct_Change",
+        "Avg_Open_To_Buy":      "Credit_Available",
+    }
+    df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+
+    # ── Step 5: Coerce numeric columns to float ───────────────────────────────
+    for col in df.columns:
+        if col != "Churn":
+            df[col] = pd.to_numeric(df[col], errors="ignore")
+
+    numeric_cols = [
+        c for c in df.columns
+        if c != "Churn" and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    categorical_cols = [
+        c for c in df.columns
+        if c not in numeric_cols + ["Churn"]
+    ]
+
+    meta = {
+        "dataset_key": "bankchurners",
+        "dataset_name": "Bank Customer Attrition",
+        "dataset_description": (
+            "10,127 credit-card customers, 19 features. "
+            "Cleaned: dropped raw ID and two leaked Naive-Bayes columns, "
+            "encoded Attrition_Flag to binary, renamed verbose Q4-Q1 columns."
+        ),
+        "numeric_cols": numeric_cols,
+        "binary_cols": [],
+        "multi_cols": categorical_cols,
+        "categorical_cols": categorical_cols,
+        "prediction_mode": "bankchurners_form",
+        "cv_folds": 5,
+        "cleaning_steps": [
+            "Dropped `CLIENTNUM` (customer ID — no predictive signal).",
+            "Dropped 2 Naive Bayes columns pre-calculated in the source CSV (data leakage).",
+            "`Attrition_Flag` mapped to binary `Churn` (1 = attrited, 0 = retained).",
+            "Renamed `Total_Amt_Chg_Q4_Q1` → `Txn_Amt_Change` and `Total_Ct_Chg_Q4_Q1` → `Txn_Ct_Change` for readability.",
+            "`Education_Level` and `Income_Category` retain 'Unknown' as an explicit category — unknown values are predictively meaningful.",
+        ],
+    }
+    return df, meta
+
+
 def load_kkbox_data() -> tuple[pd.DataFrame, dict]:
     # KKBox challenge data requires Kaggle access. This loader expects a pre-joined
     # local file produced from the challenge tables.
@@ -122,19 +210,21 @@ def load_kkbox_data() -> tuple[pd.DataFrame, dict]:
 
 
 def load_data() -> tuple[pd.DataFrame, dict]:
-    dataset_key = os.getenv("CHURN_DATASET", "kddcup09").strip().lower()
+    dataset_key = os.getenv("CHURN_DATASET", "bankchurners").strip().lower()
     if dataset_key in {"telco", "telco_ibm", "ibm"}:
         return load_telco_data()
+    if dataset_key in {"bankchurners", "bank", "credit_card"}:
+        return load_bankchurners_data()
     if dataset_key in {"kkbox", "kkbox_challenge"}:
         try:
             return load_kkbox_data()
         except Exception as exc:
-            print(f"   KKBox dataset unavailable ({exc}); falling back to KDDCup09.")
-            return load_kdd_data()
+            print(f"   KKBox dataset unavailable ({exc}); falling back to BankChurners.")
+            return load_bankchurners_data()
     if dataset_key in {"kdd", "kddcup09", "openml_kdd"}:
         return load_kdd_data()
     raise ValueError(
-        "Unsupported CHURN_DATASET value. Use one of: telco_ibm, kddcup09, kkbox"
+        "Unsupported CHURN_DATASET value. Use one of: bankchurners, telco_ibm, kddcup09, kkbox"
     )
 
 

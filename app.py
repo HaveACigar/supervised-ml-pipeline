@@ -163,7 +163,7 @@ def render_model_card(
         (
             "KDDCup09 uses anonymized variables, so feature interpretation is relative importance rather than business-readable labels."
             if dataset_key == "kddcup09"
-            else "IBM Telco uses business-readable columns, so feature effects are directly interpretable."
+            else "Features use business-readable column names — SHAP values map directly to customer behaviors and account attributes."
         ),
     ]
     for line in summary:
@@ -264,9 +264,17 @@ def render_preprocessing(
     categorical_cols: list[str],
     dataset_name: str,
     dataset_key: str,
+    cleaning_steps: list[str] | None = None,
 ) -> None:
     st.subheader("Preprocessing Pipeline")
     st.caption(f"Configured for: {dataset_name}")
+
+    if cleaning_steps:
+        st.markdown("**Data Cleaning (applied before modeling)**")
+        for step in cleaning_steps:
+            st.markdown(f"- {step}")
+        st.divider()
+
     steps = [
         (
             "1. Encode target",
@@ -463,6 +471,117 @@ def render_feature_importance(shap_vals, feat_names: list, X_trans) -> None:
 
 
 # ── Section: Prediction Demo ───────────────────────────────────────────────────
+# ── Section: Prediction Demo ───────────────────────────────────────────────────
+def _render_bankchurners_form(pipe, chosen_model: str, shap_model_name: str) -> None:
+    """Prediction form scoped to the BankChurners feature schema."""
+    with st.form("bankchurners_form"):
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            age             = st.slider("Customer Age", 18, 73, 45)
+            gender          = st.selectbox("Gender", ["M", "F"])
+            dependent_count = st.slider("Dependents", 0, 5, 2)
+            education       = st.selectbox("Education Level", [
+                "Uneducated", "High School", "College", "Graduate",
+                "Post-Graduate", "Doctorate", "Unknown",
+            ])
+            marital         = st.selectbox("Marital Status", ["Single", "Married", "Divorced", "Unknown"])
+
+        with c2:
+            income          = st.selectbox("Income Category", [
+                "Less than $40K", "$40K - $60K", "$60K - $80K",
+                "$80K - $120K", "$120K +", "Unknown",
+            ])
+            card_category   = st.selectbox("Card Category", ["Blue", "Silver", "Gold", "Platinum"])
+            months_on_book  = st.slider("Months on Book", 13, 56, 36)
+            total_rel_count = st.slider("Number of Products Held", 1, 6, 3)
+            months_inactive = st.slider("Months Inactive (last 12)", 0, 6, 2)
+
+        with c3:
+            contacts_count  = st.slider("Bank Contacts (last 12 mo)", 0, 6, 2)
+            credit_limit    = st.number_input("Credit Limit ($)", 1438.0, 34516.0, 8500.0, step=100.0)
+            revolving_bal   = st.number_input("Total Revolving Balance ($)", 0.0, 2517.0, 1200.0, step=50.0)
+            credit_avail    = st.number_input("Credit Available ($)", 3.0, 34516.0, 7000.0, step=100.0)
+
+        c4, c5 = st.columns(2)
+        with c4:
+            txn_amt         = st.number_input("Total Transaction Amount ($)", 510.0, 18484.0, 4500.0, step=100.0)
+            txn_ct          = st.slider("Total Transaction Count", 10, 139, 60)
+        with c5:
+            txn_amt_chg     = st.number_input("Txn Amount Change (Q4/Q1)", 0.0, 3.4, 0.76, step=0.01)
+            txn_ct_chg      = st.number_input("Txn Count Change (Q4/Q1)", 0.0, 3.7, 0.71, step=0.01)
+            util_ratio      = st.slider("Avg Utilization Ratio", 0.0, 1.0, 0.27, step=0.01)
+
+        submitted = st.form_submit_button("Predict Churn Probability", use_container_width=True)
+
+    if submitted:
+        row = pd.DataFrame([{
+            "Customer_Age":             age,
+            "Gender":                   gender,
+            "Dependent_count":          dependent_count,
+            "Education_Level":          education,
+            "Marital_Status":           marital,
+            "Income_Category":          income,
+            "Card_Category":            card_category,
+            "Months_on_book":           months_on_book,
+            "Total_Relationship_Count": total_rel_count,
+            "Months_Inactive_12_mon":   months_inactive,
+            "Contacts_Count_12_mon":    contacts_count,
+            "Credit_Limit":             credit_limit,
+            "Total_Revolving_Bal":      revolving_bal,
+            "Credit_Available":         credit_avail,
+            "Txn_Amt_Change":           txn_amt_chg,
+            "Total_Trans_Amt":          txn_amt,
+            "Total_Trans_Ct":           txn_ct,
+            "Txn_Ct_Change":            txn_ct_chg,
+            "Avg_Utilization_Ratio":    util_ratio,
+        }])
+
+        prob  = pipe.predict_proba(row)[0, 1]
+        pred  = "Likely to Churn" if prob >= 0.5 else "Likely to Stay"
+        color = "#F44336" if prob >= 0.5 else "#4CAF50"
+
+        st.markdown(
+            f"""<div style="padding:24px; border-radius:12px;
+                background:{color}22; border:2px solid {color};
+                text-align:center; margin-top:16px;">
+  <h2 style="color:{color}; margin:0;">{pred}</h2>
+  <h3 style="margin:8px 0 0 0;">Churn Probability: <strong>{prob * 100:.1f}%</strong></h3>
+  <p style="opacity:.7; margin:8px 0 0 0;">Model: {chosen_model}</p>
+</div>""",
+            unsafe_allow_html=True,
+        )
+
+        if chosen_model == shap_model_name:
+            prep  = pipe.named_steps["prep"]
+            clf   = pipe.named_steps["clf"]
+            X_row = prep.transform(row)
+            names = _clean(list(prep.get_feature_names_out()))
+            exp   = shap.TreeExplainer(clf)
+            sv    = exp.shap_values(X_row)
+            top_n = 10
+            idx   = np.argsort(np.abs(sv[0]))[::-1][:top_n]
+            df_force = pd.DataFrame({
+                "Feature":    [names[i] for i in idx],
+                "SHAP Value": sv[0][idx],
+            })
+            bar_colors = ["#F44336" if v > 0 else "#2196F3" for v in df_force["SHAP Value"]]
+            fig = go.Figure(go.Bar(
+                x=df_force["SHAP Value"],
+                y=df_force["Feature"],
+                orientation="h",
+                marker_color=bar_colors,
+            ))
+            fig.update_layout(
+                title=f"Top {top_n} Feature Contributions  "
+                      "(Red = ↑ churn risk, Blue = ↓ churn risk)",
+                template=TEMPLATE,
+                xaxis_title="SHAP Value",
+                yaxis=dict(autorange="reversed"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+
 def render_prediction(X, X_te, y_te, final_models: dict, dataset_meta: dict, shap_model_name: str) -> None:
     st.subheader("Churn Probability Predictor")
     st.caption("Estimate churn probability using any trained model.")
@@ -471,6 +590,10 @@ def render_prediction(X, X_te, y_te, final_models: dict, dataset_meta: dict, sha
     default_idx  = model_names.index("XGBoost") if "XGBoost" in model_names else 0
     chosen_model = st.selectbox("Model:", model_names, index=default_idx)
     pipe         = final_models[chosen_model]
+
+    if dataset_meta.get("prediction_mode") == "bankchurners_form":
+        _render_bankchurners_form(pipe, chosen_model, shap_model_name)
+        return
 
     if dataset_meta.get("prediction_mode") != "form":
         st.info("This dataset uses a high-dimensional schema, so prediction demo runs on holdout rows.")
@@ -653,7 +776,7 @@ def main() -> None:
         render_feature_explorer(df, numeric_cols, categorical_cols)
     with tabs[3]:
         render_takeaway("preprocessing", takeaways)
-        render_preprocessing(numeric_cols, categorical_cols, dataset_name, dataset_key)
+        render_preprocessing(numeric_cols, categorical_cols, dataset_name, dataset_key, dataset_meta.get("cleaning_steps"))
     with tabs[4]:
         render_takeaway("model_comparison", takeaways)
         render_model_comparison(cv_results, len(df), cv_folds)
