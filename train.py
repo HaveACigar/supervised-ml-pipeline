@@ -94,7 +94,7 @@ def load_bankchurners_data() -> tuple[pd.DataFrame, dict]:
     5. Keep "Unknown" as an explicit category in Education_Level / Income_Category
        (domain-appropriate: unknown income/education is itself a signal)
     """
-    ds = fetch_openml(data_id=42178, as_frame=True, parser="auto")
+    ds = fetch_openml(data_id=42178, as_frame=True)
     df = ds.data.copy()
 
     # ── Step 1 & 2: Drop ID and leaked model columns ──────────────────────────
