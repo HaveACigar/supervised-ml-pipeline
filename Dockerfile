@@ -14,7 +14,7 @@ COPY . .
 # Pre-train models and save artifacts — baked into image so startup is instant
 RUN python train.py
 
-ENV CHURN_DATASET=bankchurners \
+ENV CHURN_DATASET=bank_marketing \
     PORT=8080
 EXPOSE 8080
 

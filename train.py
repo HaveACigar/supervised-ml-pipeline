@@ -81,59 +81,48 @@ def load_kdd_data() -> tuple[pd.DataFrame, dict]:
     return df, meta
 
 
-def load_bankchurners_data() -> tuple[pd.DataFrame, dict]:
+def load_bank_marketing_data() -> tuple[pd.DataFrame, dict]:
     """
-    Bank Customer Attrition (BankChurners) via OpenML (data_id=42178).
-    ~10,127 rows, 21 meaningful features after cleaning.
-
-    Data cleaning steps demonstrated:
-    1. Drop CLIENTNUM (raw ID column — no predictive value)
-    2. Drop two Naive Bayes classifier columns leaked into the source CSV
-    3. Map Attrition_Flag ("Attrited Customer" / "Existing Customer") to binary Churn
-    4. Normalize verbose Q4-Q1 change column names to shorter readable form
-    5. Keep "Unknown" as an explicit category in Education_Level / Income_Category
-       (domain-appropriate: unknown income/education is itself a signal)
+    UCI Bank Marketing via OpenML (data_id=1461).
+    45,211 rows, 16 business-readable predictors.
     """
-    ds = fetch_openml(data_id=42178, as_frame=True)
+    ds = fetch_openml(data_id=1461, as_frame=True)
     df = ds.data.copy()
 
-    # ── Step 1 & 2: Drop ID and leaked model columns ──────────────────────────
-    drop_cols = [c for c in df.columns if
-                 c == "CLIENTNUM" or
-                 c.lower().startswith("naive_bayes")]
-    if drop_cols:
-        df = df.drop(columns=drop_cols)
+    # OpenML exposes the target separately (Class: yes/no).
+    y = ds.target.astype(str).str.strip().str.lower()
+    # OpenML encodes this dataset as 1/2, where 2 is the positive campaign response.
+    df["Churn"] = y.map({"yes": 1, "2": 1, "true": 1}).fillna(0).astype(int)
 
-    # ── Step 3: Encode target ─────────────────────────────────────────────────
-    target_col = "Attrition_Flag"
-    if target_col not in df.columns:
-        # Some OpenML versions already name it differently
-        target_col = next(
-            (c for c in df.columns if "attrition" in c.lower() or "churn" in c.lower()),
-            None,
-        )
-    if target_col is None:
-        raise ValueError("Cannot locate target column in BankChurners dataset.")
-
-    df["Churn"] = (
-        ds.target.astype(str).str.strip()
-        .map({"Attrited Customer": 1, "1": 1})
-        .fillna(0).astype(int)
-    )
-    df = df.drop(columns=[target_col], errors="ignore")
-
-    # ── Step 4: Rename verbose Q4-Q1 change columns ───────────────────────────
+    # Decode anonymized V1..V16 headers into business-readable labels.
     rename_map = {
-        "Total_Amt_Chg_Q4_Q1": "Txn_Amt_Change",
-        "Total_Ct_Chg_Q4_Q1":  "Txn_Ct_Change",
-        "Avg_Open_To_Buy":      "Credit_Available",
+        "V1": "age",
+        "V2": "job",
+        "V3": "marital",
+        "V4": "education",
+        "V5": "credit_default",
+        "V6": "balance",
+        "V7": "housing_loan",
+        "V8": "personal_loan",
+        "V9": "contact_channel",
+        "V10": "last_contact_day",
+        "V11": "last_contact_month",
+        "V12": "last_contact_duration_sec",
+        "V13": "campaign_contacts",
+        "V14": "days_since_prior_contact",
+        "V15": "prior_contacts",
+        "V16": "prior_campaign_outcome",
     }
     df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
+    df.columns = [str(c).strip().replace("-", "_") for c in df.columns]
 
-    # ── Step 5: Coerce numeric columns to float ───────────────────────────────
     for col in df.columns:
-        if col != "Churn":
-            df[col] = pd.to_numeric(df[col], errors="ignore")
+        if col == "Churn":
+            continue
+        converted = pd.to_numeric(df[col], errors="coerce")
+        if converted.notna().sum() == 0 and df[col].notna().sum() > 0:
+            continue
+        df[col] = converted
 
     numeric_cols = [
         c for c in df.columns
@@ -145,25 +134,23 @@ def load_bankchurners_data() -> tuple[pd.DataFrame, dict]:
     ]
 
     meta = {
-        "dataset_key": "bankchurners",
-        "dataset_name": "Bank Customer Attrition",
+        "dataset_key": "bank_marketing",
+        "dataset_name": "UCI Bank Marketing (OpenML)",
         "dataset_description": (
-            "10,127 credit-card customers, 19 features. "
-            "Cleaned: dropped raw ID and two leaked Naive-Bayes columns, "
-            "encoded Attrition_Flag to binary, renamed verbose Q4-Q1 columns."
+            "45,211 bank campaign contacts with 16 interpretable features. "
+            "Cleaned: decoded V1-V16 columns to business-readable names and encoded campaign response target to binary churn risk."
         ),
         "numeric_cols": numeric_cols,
         "binary_cols": [],
         "multi_cols": categorical_cols,
         "categorical_cols": categorical_cols,
-        "prediction_mode": "bankchurners_form",
+        "prediction_mode": "sample_row",
         "cv_folds": 5,
         "cleaning_steps": [
-            "Dropped `CLIENTNUM` (customer ID — no predictive signal).",
-            "Dropped 2 Naive Bayes columns pre-calculated in the source CSV (data leakage).",
-            "`Attrition_Flag` mapped to binary `Churn` (1 = attrited, 0 = retained).",
-            "Renamed `Total_Amt_Chg_Q4_Q1` → `Txn_Amt_Change` and `Total_Ct_Chg_Q4_Q1` → `Txn_Ct_Change` for readability.",
-            "`Education_Level` and `Income_Category` retain 'Unknown' as an explicit category — unknown values are predictively meaningful.",
+            "Mapped OpenML target (`Class`) to binary `Churn` (yes=1, no=0).",
+            "Decoded anonymized `V1-V16` headers into readable business fields (age, job, marital, contact history, etc.).",
+            "Standardized column naming (`-` replaced with `_`) for consistent preprocessing and app display.",
+            "Applied numeric coercion where possible while preserving true categorical fields.",
         ],
     }
     return df, meta
@@ -210,21 +197,21 @@ def load_kkbox_data() -> tuple[pd.DataFrame, dict]:
 
 
 def load_data() -> tuple[pd.DataFrame, dict]:
-    dataset_key = os.getenv("CHURN_DATASET", "bankchurners").strip().lower()
+    dataset_key = os.getenv("CHURN_DATASET", "bank_marketing").strip().lower()
     if dataset_key in {"telco", "telco_ibm", "ibm"}:
         return load_telco_data()
-    if dataset_key in {"bankchurners", "bank", "credit_card"}:
-        return load_bankchurners_data()
+    if dataset_key in {"bank_marketing", "bank", "bankmarketing", "uci_bank"}:
+        return load_bank_marketing_data()
     if dataset_key in {"kkbox", "kkbox_challenge"}:
         try:
             return load_kkbox_data()
         except Exception as exc:
-            print(f"   KKBox dataset unavailable ({exc}); falling back to BankChurners.")
-            return load_bankchurners_data()
+            print(f"   KKBox dataset unavailable ({exc}); falling back to Bank Marketing.")
+            return load_bank_marketing_data()
     if dataset_key in {"kdd", "kddcup09", "openml_kdd"}:
         return load_kdd_data()
     raise ValueError(
-        "Unsupported CHURN_DATASET value. Use one of: bankchurners, telco_ibm, kddcup09, kkbox"
+        "Unsupported CHURN_DATASET value. Use one of: bank_marketing, telco_ibm, kddcup09, kkbox"
     )
 
 
