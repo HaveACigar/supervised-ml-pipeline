@@ -31,20 +31,32 @@ CHURN_COLORS  = {"No": "#2196F3", "Yes": "#F44336"}
 MODEL_COLORS  = ["#4CAF50", "#2196F3", "#FF9800", "#9C27B0"]
 TEMPLATE      = "plotly_dark"
 
-TAB_TAKEAWAYS = {
-    "model_card": "This model card translates technical quality into business readiness, showing whether the risk signal is strong enough for intervention programs.",
-    "overview": "Churn concentration and data profile indicate where retention budget will deliver the highest marginal impact.",
-    "feature_explorer": "Feature-level patterns reveal which customer behaviors and service frictions are most likely to drive avoidable revenue loss.",
-    "preprocessing": "Pipeline governance protects decision integrity by reducing leakage and ensuring model outputs can be trusted in production settings.",
-    "model_comparison": "Comparative performance makes trade-offs explicit so leadership can choose models based on business risk tolerance, not just accuracy.",
-    "evaluation": "Holdout evaluation estimates real-world intervention precision, helping teams align outreach volume with operational capacity.",
-    "feature_importance": "Explainability clarifies what drives predicted churn, enabling policy and product responses that are targeted instead of generic.",
-    "prediction_demo": "Scenario scoring turns analytics into action by showing which customer profiles warrant immediate retention treatment.",
-}
+def build_takeaways(df: pd.DataFrame, cv_results: dict, top_features: pd.DataFrame) -> dict:
+    churn_rate = float(df["Churn"].mean() * 100)
+    results_df = (
+        pd.DataFrame(cv_results)
+        .T.reset_index()
+        .rename(columns={"index": "Model"})
+        .sort_values("ROC-AUC", ascending=False)
+    )
+    best = results_df.iloc[0]
+    gap = float(best["ROC-AUC"] - results_df.iloc[-1]["ROC-AUC"]) if len(results_df) > 1 else 0.0
+    top_driver = str(top_features.iloc[0]["Feature"]) if not top_features.empty else "the top risk driver"
+
+    return {
+        "model_card": f"Best model is {best['Model']} at ROC-AUC {best['ROC-AUC']:.3f}, indicating the risk signal is strong enough to guide targeted retention action.",
+        "overview": f"Current churn rate is {churn_rate:.1f}%, which defines the baseline risk exposure and expected retention upside from intervention programs.",
+        "feature_explorer": "Distribution and cohort patterns in this view identify where churn risk is concentrated so retention spend can be prioritized by segment.",
+        "preprocessing": "Leakage-safe preprocessing ensures leadership decisions are based on realistic, production-representative performance rather than optimistic offline bias.",
+        "model_comparison": f"Model spread is {gap:.3f} ROC-AUC from best to weakest, quantifying the performance premium available from model choice.",
+        "evaluation": "Holdout evaluation clarifies precision and recall tradeoffs so outreach volume can be aligned with team capacity and expected ROI.",
+        "feature_importance": f"{top_driver} is currently the strongest model driver, pointing to where policy and product adjustments may have highest churn impact.",
+        "prediction_demo": "Scenario scoring converts analytics into action by flagging which customer profiles should enter immediate save-treatment workflows.",
+    }
 
 
-def render_takeaway(key: str) -> None:
-    st.info(f"Shareholder Takeaway: {TAB_TAKEAWAYS[key]}")
+def render_takeaway(key: str, takeaways: dict) -> None:
+    st.info(f"Shareholder Takeaway: {takeaways[key]}")
 
 
 def _clean(names) -> list[str]:
@@ -610,6 +622,8 @@ def main() -> None:
     dataset_name = dataset_meta.get("dataset_name", "Customer Churn Dataset")
     dataset_key = dataset_meta.get("dataset_key", "")
     dataset_desc = dataset_meta.get("dataset_description", "")
+    top_features = _top_shap_features(shap_vals, feat_names, top_n=5)
+    takeaways = build_takeaways(df, cv_results, top_features)
 
     st.markdown(
         f"**Dataset:** {dataset_name}. {dataset_desc} "
@@ -629,28 +643,28 @@ def main() -> None:
     ])
 
     with tabs[0]:
-        render_takeaway("model_card")
+        render_takeaway("model_card", takeaways)
         render_model_card(df, cv_results, shap_vals, feat_names, dataset_name, dataset_key, shap_model_name)
     with tabs[1]:
-        render_takeaway("overview")
+        render_takeaway("overview", takeaways)
         render_overview(df, numeric_cols)
     with tabs[2]:
-        render_takeaway("feature_explorer")
+        render_takeaway("feature_explorer", takeaways)
         render_feature_explorer(df, numeric_cols, categorical_cols)
     with tabs[3]:
-        render_takeaway("preprocessing")
+        render_takeaway("preprocessing", takeaways)
         render_preprocessing(numeric_cols, categorical_cols, dataset_name, dataset_key)
     with tabs[4]:
-        render_takeaway("model_comparison")
+        render_takeaway("model_comparison", takeaways)
         render_model_comparison(cv_results, len(df), cv_folds)
     with tabs[5]:
-        render_takeaway("evaluation")
+        render_takeaway("evaluation", takeaways)
         render_evaluation(X_te, y_te, eval_models)
     with tabs[6]:
-        render_takeaway("feature_importance")
+        render_takeaway("feature_importance", takeaways)
         render_feature_importance(shap_vals, feat_names, X_trans)
     with tabs[7]:
-        render_takeaway("prediction_demo")
+        render_takeaway("prediction_demo", takeaways)
         render_prediction(X, X_te, y_te, final_models, dataset_meta, shap_model_name)
 
 
