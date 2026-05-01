@@ -31,6 +31,21 @@ CHURN_COLORS  = {"No": "#2196F3", "Yes": "#F44336"}
 MODEL_COLORS  = ["#4CAF50", "#2196F3", "#FF9800", "#9C27B0"]
 TEMPLATE      = "plotly_dark"
 
+TAB_TAKEAWAYS = {
+    "model_card": "This model card translates technical quality into business readiness, showing whether the risk signal is strong enough for intervention programs.",
+    "overview": "Churn concentration and data profile indicate where retention budget will deliver the highest marginal impact.",
+    "feature_explorer": "Feature-level patterns reveal which customer behaviors and service frictions are most likely to drive avoidable revenue loss.",
+    "preprocessing": "Pipeline governance protects decision integrity by reducing leakage and ensuring model outputs can be trusted in production settings.",
+    "model_comparison": "Comparative performance makes trade-offs explicit so leadership can choose models based on business risk tolerance, not just accuracy.",
+    "evaluation": "Holdout evaluation estimates real-world intervention precision, helping teams align outreach volume with operational capacity.",
+    "feature_importance": "Explainability clarifies what drives predicted churn, enabling policy and product responses that are targeted instead of generic.",
+    "prediction_demo": "Scenario scoring turns analytics into action by showing which customer profiles warrant immediate retention treatment.",
+}
+
+
+def render_takeaway(key: str) -> None:
+    st.info(f"Shareholder Takeaway: {TAB_TAKEAWAYS[key]}")
+
 
 def _clean(names) -> list[str]:
     return [n.split("__", 1)[1] if "__" in n else n for n in names]
@@ -613,14 +628,30 @@ def main() -> None:
         "🎯 Prediction Demo",
     ])
 
-    with tabs[0]: render_model_card(df, cv_results, shap_vals, feat_names, dataset_name, dataset_key, shap_model_name)
-    with tabs[1]: render_overview(df, numeric_cols)
-    with tabs[2]: render_feature_explorer(df, numeric_cols, categorical_cols)
-    with tabs[3]: render_preprocessing(numeric_cols, categorical_cols, dataset_name, dataset_key)
-    with tabs[4]: render_model_comparison(cv_results, len(df), cv_folds)
-    with tabs[5]: render_evaluation(X_te, y_te, eval_models)
-    with tabs[6]: render_feature_importance(shap_vals, feat_names, X_trans)
-    with tabs[7]: render_prediction(X, X_te, y_te, final_models, dataset_meta, shap_model_name)
+    with tabs[0]:
+        render_takeaway("model_card")
+        render_model_card(df, cv_results, shap_vals, feat_names, dataset_name, dataset_key, shap_model_name)
+    with tabs[1]:
+        render_takeaway("overview")
+        render_overview(df, numeric_cols)
+    with tabs[2]:
+        render_takeaway("feature_explorer")
+        render_feature_explorer(df, numeric_cols, categorical_cols)
+    with tabs[3]:
+        render_takeaway("preprocessing")
+        render_preprocessing(numeric_cols, categorical_cols, dataset_name, dataset_key)
+    with tabs[4]:
+        render_takeaway("model_comparison")
+        render_model_comparison(cv_results, len(df), cv_folds)
+    with tabs[5]:
+        render_takeaway("evaluation")
+        render_evaluation(X_te, y_te, eval_models)
+    with tabs[6]:
+        render_takeaway("feature_importance")
+        render_feature_importance(shap_vals, feat_names, X_trans)
+    with tabs[7]:
+        render_takeaway("prediction_demo")
+        render_prediction(X, X_te, y_te, final_models, dataset_meta, shap_model_name)
 
 
 if __name__ == "__main__":
